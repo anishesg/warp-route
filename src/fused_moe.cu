@@ -236,10 +236,22 @@ void fused_moe_forward(
     float*       d_output,
     cudaStream_t stream)
 {
+    if (p.top_k < 1 || p.top_k > 2) {
+        fprintf(stderr, "fused_moe_forward: top_k must be 1 or 2, got %d\n", p.top_k);
+        exit(1);
+    }
+    if (p.layout.num_experts > GATE_MAX_EXPERTS) {
+        fprintf(stderr, "fused_moe_forward: num_experts %d exceeds GATE_MAX_EXPERTS %d\n",
+                p.layout.num_experts, GATE_MAX_EXPERTS);
+        exit(1);
+    }
+
     const ExpertLayoutConfig& cfg = p.layout;
     ExpertOffsets off = compute_offsets(cfg);
 
-    // Shared memory: logits + xtile + gate_row + up_row
+    // Shared memory: logits[num_experts] + xtile[TILE_IN] + gate_row[TILE_OUT] + up_row[TILE_OUT]
+    // top-2 routing: the kernel processes both experts sequentially within the same warp,
+    // accumulating weighted outputs before a single final global memory write per output row.
     int smem_bytes = (cfg.num_experts + TILE_IN + 2 * TILE_OUT) * sizeof(float);
 
     k_fused_moe<<<1, 32, smem_bytes, stream>>>(

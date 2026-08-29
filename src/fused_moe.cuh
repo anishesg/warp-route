@@ -5,7 +5,14 @@
 // Fused MoE decode kernel: computes gating, expert FFN, and weighted output
 // accumulation in a single kernel launch with no permutation buffers.
 //
-// top_k must be 1 or 2. For top_k > 2 use the naive reference.
+// top_k must be 1 or 2.
+//
+// top-1: single expert FFN computed in registers, output written once.
+// top-2: both experts processed sequentially in the same warp; gate weights
+//        are applied during accumulation so outputs are summed before
+//        the final global memory write, avoiding two separate passes.
+//
+// For top_k > 2 use the naive reference.
 
 struct FusedMoEParams {
     const float* gate_matrix;   // [num_experts x hidden_dim] router weights
