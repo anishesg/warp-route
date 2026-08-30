@@ -4,6 +4,7 @@
 #include "expert_layout.cuh"
 #include "naive_moe.cuh"
 #include "fused_moe.cuh"
+#include "fused_moe_batched.cuh"
 
 #define CHECK_CONTIGUOUS(t) TORCH_CHECK((t).is_contiguous(), #t " must be contiguous")
 #define CHECK_CUDA(t)       TORCH_CHECK((t).is_cuda(),       #t " must be a CUDA tensor")
@@ -104,7 +105,42 @@ torch::Tensor batched_fused_moe_forward_torch(
     int num_experts,
     int hidden_dim,
     int intermediate_dim,
-    int top_k);
+    int top_k)
+{
+    CHECK_CUDA(hidden_batch); CHECK_CONTIGUOUS(hidden_batch); CHECK_FLOAT(hidden_batch);
+    TORCH_CHECK(hidden_batch.dim() == 2 && hidden_batch.size(1) == hidden_dim,
+        "hidden_batch must have shape [batch_size, ", hidden_dim, "], got shape ", hidden_batch.sizes());
+
+    validate_2d(gate_w, "gate_w", num_experts, hidden_dim);
+    CHECK_CUDA(weight_buf); CHECK_CONTIGUOUS(weight_buf); CHECK_FLOAT(weight_buf);
+
+    TORCH_CHECK(top_k >= 1 && top_k <= 2, "top_k must be 1 or 2 for fused kernel, got ", top_k);
+    TORCH_CHECK(num_experts <= GATE_MAX_EXPERTS,
+        "num_experts ", num_experts, " exceeds GATE_MAX_EXPERTS ", GATE_MAX_EXPERTS);
+
+    ExpertLayoutConfig layout{num_experts, hidden_dim, intermediate_dim};
+    int64_t expected_weight_bytes = total_weight_bytes(layout);
+    TORCH_CHECK(weight_buf.numel() * (int64_t)sizeof(float) >= expected_weight_bytes,
+        "weight_buf too small: need ", expected_weight_bytes, " bytes, got ",
+        weight_buf.numel() * sizeof(float));
+
+    int batch_size = (int)hidden_batch.size(0);
+    auto output = torch::zeros({batch_size, hidden_dim}, hidden_batch.options());
+
+    BatchedFusedMoEParams params{
+        gate_w.data_ptr<float>(),
+        weight_buf.data_ptr<float>(),
+        layout,
+        top_k,
+        batch_size
+    };
+    batched_fused_moe_forward(params,
+        hidden_batch.data_ptr<float>(),
+        output.data_ptr<float>());
+    cudaDeviceSynchronize();
+
+    return output;
+}
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("naive_moe_forward", &naive_moe_forward_torch,
